@@ -1,4 +1,4 @@
-🧬 MATE-GBI Gene Explorer
+<h1>🧬 MATE-GBI Gene Explorer</h1>
 A  Bioinformatics Tool for Gene Metadata & Functional Analysis
 Designed by Maher, MATE-GBI, this application provides a streamlined interface to query the Ensembl REST API and leverages Google Gemini AI for advanced biological relationship synthesis.
 🚀 Key Features
