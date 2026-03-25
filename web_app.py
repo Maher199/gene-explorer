@@ -13,7 +13,7 @@ SERVERS = {
 }
 HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
 ENSEMBL_ID_PATTERN = re.compile(r"^ENS[A-Z]*[GTPR]\d+(?:\.\d+)?$")
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-2.5-flash"
 
 # --- Helper Functions ---
 def fetch_json(base_url, endpoint):
