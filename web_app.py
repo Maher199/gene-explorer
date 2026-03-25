@@ -41,7 +41,18 @@ with st.sidebar:
     
     st.markdown("---")
     db_choice = st.selectbox("Database Server:", list(SERVERS.keys()))
-    api_key = st.text_input("Gemini API Key:", type="password", help="Get a free key at aistudio.google.com")
+
+    # --- THE SECRETS PART ---
+    try:
+        # This line fetches the key from the hidden settings
+        api_key = st.secrets["GEMINI_API_KEY"]
+        st.success("🤖 AI Engine Connected")
+    except:
+        st.error("⚠️ API Key not found in Secrets.")
+        api_key = None
+    # ------------------------
+
+
     ai_enabled = st.checkbox("Enable AI Analysis", value=True)
     
     st.markdown("---")
