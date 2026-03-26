@@ -15,7 +15,7 @@ SERVERS = {
 }
 
 HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-2.5-pro"
 
 # --- 2. Logic Functions ---
 
