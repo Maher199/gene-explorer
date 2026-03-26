@@ -91,6 +91,7 @@ with st.sidebar:
 
     ai_enabled = st.checkbox("Enable AI Analysis", value=True)
     st.caption("Designed by Maher, MATE-GBI")
+    st.caption("Hungarian University of Agriculture and Life Science")
 
 # --- 4. Main Interface ---
 
