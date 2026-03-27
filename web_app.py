@@ -29,7 +29,7 @@ SPECIES_MAP = {
 }
 
 HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
-MODEL_NAME = "gemini-3.1-flash-preview"
+MODEL_NAME = "gemini-3-flash-preview"
 
 # --- 2. THE SEARCH ENGINE ---
 
