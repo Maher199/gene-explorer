@@ -7,15 +7,18 @@ from google import genai
 # --- 1. Configuration ---
 st.set_page_config(page_title="MATE-GBI Gene Explorer", layout="wide")
 
-SERVERS = {
-    "Vertebrates (Ensembl Main)": "https://rest.ensembl.org",
-    "Plants (Ensembl Genomes)": "https://rest.ensemblgenomes.org",
-    "Bacteria (Ensembl Genomes)": "https://rest.ensemblgenomes.org",
-    "Fungi (Ensembl Genomes)": "https://rest.ensemblgenomes.org"
+# The two physical Ensembl API locations
+MAIN_SERVER = "https://rest.ensembl.org"
+GENOMES_SERVER = "https://rest.ensemblgenomes.org"
+
+# Display names for the UI
+SERVER_OPTIONS = {
+    "Vertebrates / Wheat": MAIN_SERVER,
+    "Other Plants / Bacteria / Fungi": GENOMES_SERVER
 }
 
 HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
-MODEL_NAME = "gemini-3-flash-preview"
+MODEL_NAME = "gemini-3.1-flash-preview"
 
 # --- 2. Logic Functions ---
 
@@ -29,35 +32,41 @@ def fetch_api(base_url, endpoint):
         pass
     return None
 
-def smart_lookup(base_url, species, query):
+def smart_lookup(user_selected_url, species, query):
     """
-    Strict search logic:
-    1. Check if it's a known Ensembl ID format (ENSG, Traes, etc.)
-    2. Search by Symbol using the EXACT species provided.
-    3. Search Xrefs ONLY within that specific species.
+    Advanced Routing: 
+    If ID starts with 'Traes', force the Main Server (Wheat Exception).
+    Otherwise, use the user's selected server.
     """
     if not query or not species: return None
     
-    # Improved ID Regex: Must start with specific prefixes followed by numbers
-    # This prevents names like 'BRCA2' or 'lacZ' from being treated as IDs
-    is_id = bool(re.match(r"^(ENS[A-Z]*G|Traes|Os|AT|MLOC|HORVU|Zm|Sobic|b\d{4})\d+", query, re.I))
+    # 1. Detect Wheat ID (Traes...)
+    is_wheat_id = bool(re.match(r"^Traes", query, re.I))
+    is_ensembl_id = bool(re.match(r"^(ENS[A-Z]*G|Os|AT|MLOC|HORVU|Zm|Sobic|b\d{4})\d+", query, re.I))
     
-    # A. If it's an ID, look it up globally
-    if is_id:
-        data = fetch_api(base_url, f"/lookup/id/{query}")
+    # Decide which server to try first
+    primary_url = MAIN_SERVER if (is_wheat_id or "human" in species or "homo" in species) else user_selected_url
+    
+    # A. ID Lookup
+    if is_wheat_id or is_ensembl_id:
+        data = fetch_api(primary_url, f"/lookup/id/{query}")
+        if data: return data
+        # Fallback to the other server if ID not found on primary
+        secondary_url = GENOMES_SERVER if primary_url == MAIN_SERVER else MAIN_SERVER
+        data = fetch_api(secondary_url, f"/lookup/id/{query}")
         if data: return data
 
-    # B. Standard Symbol Lookup (Strictly using the user's species)
-    data = fetch_api(base_url, f"/lookup/symbol/{species}/{query}")
+    # B. Symbol Lookup (Strictly using the selected species)
+    data = fetch_api(primary_url, f"/lookup/symbol/{species}/{query}")
     if data: return data
 
-    # C. Xref Search (As a backup for synonyms, but still locked to the user's species)
-    xrefs = fetch_api(base_url, f"/xrefs/symbol/{species}/{query}")
+    # C. Xref Search (Deep search for synonyms)
+    xrefs = fetch_api(primary_url, f"/xrefs/symbol/{species}/{query}")
     if xrefs:
         for item in xrefs:
             if item.get("type") == "gene":
-                # Ensure the found ID belongs to the correct species before returning
-                lookup_data = fetch_api(base_url, f"/lookup/id/{item.get('id')}")
+                lookup_data = fetch_api(primary_url, f"/lookup/id/{item.get('id')}")
+                # Safety check to ensure we didn't jump to a different species (like a shark)
                 if lookup_data and lookup_data.get('species').lower() == species.lower():
                     return lookup_data
     return None
@@ -79,8 +88,8 @@ with st.sidebar:
         st.title("MATE-GBI")
     
     st.markdown("### 🖥️ Database Settings")
-    selected_division = st.selectbox("Choose Division:", list(SERVERS.keys()))
-    base_url = SERVERS[selected_division]
+    selected_label = st.selectbox("Search Target:", list(SERVER_OPTIONS.keys()))
+    user_url = SERVER_OPTIONS[selected_label]
 
     st.markdown("---")
     try:
@@ -91,34 +100,28 @@ with st.sidebar:
 
     ai_enabled = st.checkbox("Enable AI Analysis", value=True)
     st.caption("Designed by Maher, MATE-GBI")
-    st.caption("Hungarian University of Agriculture and Life Science")
 
-# --- 4. Main Interface ---
+# --- 4. Main UI ---
 
 st.title("🧬 Gene Explorer")
 
-# User types the species name here
-species_input = st.text_input("Species Name (e.g. homo_sapiens, triticum_aestivum, escherichia_coli):", value="homo_sapiens")
+species_input = st.text_input("Species Name:", value="triticum_aestivum")
 
 tab1, tab2 = st.tabs(["🔍 Single Lookup", "🔗 Relationship Analysis"])
 
 with tab1:
     c1, c2 = st.columns([1, 2])
     with c1:
-        query_input = st.text_input("Gene Symbol or ID:", placeholder="e.g. BRCA2, Rht-B1")
+        query_input = st.text_input("Gene Symbol or ID:", placeholder="e.g. TraesCS3B02G591300")
         search_btn = st.button("Fetch Data", use_container_width=True)
 
     if search_btn and query_input:
-        with st.spinner(f"Querying {selected_division}..."):
-            data = smart_lookup(base_url, species_input, query_input)
+        with st.spinner("Searching Ensembl..."):
+            data = smart_lookup(user_url, species_input, query_input)
         
         if data:
-            # Final safety check: Does the result species match the input species?
-            res_species = data.get('species', '').lower()
-            if res_species != species_input.lower() and selected_division != "Bacteria":
-                st.warning(f"Note: Found a close match in '{res_species}'.")
-
-            st.success(f"✅ Results for: {data.get('display_name', query_input)}")
+            st.success(f"✅ Result Found!")
+            st.markdown(f"### {data.get('display_name', query_input)}")
             st.markdown(f"**Description:** {data.get('description', 'N/A')}")
             
             res_c1, res_c2 = st.columns(2)
@@ -127,18 +130,18 @@ with tab1:
                 st.write(f"**Ensembl ID:** `{data.get('id')}`")
             with res_c2:
                 st.write(f"**Location:** {data.get('seq_region_name')}:{data.get('start')}-{data.get('end')}")
-                st.write(f"**Biotype:** {data.get('biotype')}")
+                st.write(f"**Assembly:** {data.get('assembly_name')}")
 
             if ai_enabled and api_key:
-                with st.spinner("AI Thinking..."):
-                    prompt = f"Provide a concise, scientific 3-bullet summary for this gene metadata: {json.dumps(data)}"
-                    st.info(f"**🤖 AI Analysis:**\n\n{call_gemini(api_key, prompt)}")
+                with st.spinner("AI Analysis..."):
+                    prompt = f"Provide a concise, scientific 3-bullet summary for this gene: {json.dumps(data)}"
+                    st.info(f"**🤖 AI Insights:**\n\n{call_gemini(api_key, prompt)}")
         else:
-            st.error(f"❌ '{query_input}' not found in '{species_input}' on the {selected_division} server.")
+            st.error(f"❌ '{query_input}' not found. Note: Wheat IDs (Traes...) live on the Main server.")
 
 with tab2:
     st.subheader("Multi-Gene Relationship Analysis")
-    gene_list_raw = st.text_area("Gene symbols (separated by commas):", placeholder="TP53, BRCA1, ATM")
+    gene_list_raw = st.text_area("List (commas):", placeholder="TraesCS3B02G591300, TraesCS3D02G520300")
     analyze_btn = st.button("Analyze Connections")
 
     if analyze_btn and gene_list_raw:
@@ -149,7 +152,7 @@ with tab2:
             collected_data = []
             pbar = st.progress(0)
             for i, g in enumerate(genes):
-                d = smart_lookup(base_url, species_input, g)
+                d = smart_lookup(user_url, species_input, g)
                 if d:
                     collected_data.append({"symbol": d.get('display_name'), "desc": d.get('description')})
                 pbar.progress((i + 1) / len(genes))
