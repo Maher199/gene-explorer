@@ -7,23 +7,15 @@ from google import genai
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="MATE-GBI Universal Gene Explorer", layout="wide")
 
-# PHYSICAL SERVERS
 MAIN_SERVER = "https://rest.ensembl.org"
 GENOMES_SERVER = "https://rest.ensemblgenomes.org"
 
-# KINGDOM TO SERVER MAPPING
+# DATABASE CATEGORIES
 KINGDOMS = {
     "Vertebrates": MAIN_SERVER,
     "Plants": GENOMES_SERVER,
     "Bacteria": GENOMES_SERVER,
     "Fungi": GENOMES_SERVER
-}
-
-# ALIASES FOR REFERENCE STRAINS (Ensures names like 'escherichia_coli' work)
-SPECIES_MAP = {
-    "escherichia_coli": "escherichia_coli_str_k_12_substr_mg1655",
-    "wheat": "triticum_aestivum",
-    "rice": "oryza_sativa"
 }
 
 HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -39,47 +31,48 @@ def fetch(base_url, endpoint):
     except: pass
     return None
 
+def resolve_exact_species(base_url, species_query):
+    """
+    Finds the exact 'slug' name on the server.
+    Fixes 'hordeum_vulgare' -> 'hordeum_vulgare_core_51_91_3' or similar.
+    """
+    res = fetch(base_url, f"/info/species?name={species_query}")
+    if res and "species" in res and len(res["species"]) > 0:
+        return res["species"][0]["name"]
+    return species_query
+
 def smart_lookup(kingdom, species, query):
     if not query or not species: return None
     
     query = query.strip()
-    input_sp = species.strip().lower()
-    # Resolve official slug (e.g. escherichia_coli -> escherichia_coli_str_k_12_substr_mg1655)
-    species_slug = SPECIES_MAP.get(input_sp, input_sp)
+    # Route Wheat to Main server, others to Genomes/Main based on selection
+    is_wheat = bool(re.match(r"^Traes", query, re.I)) or "triticum_aestivum" in species.lower()
+    base_url = MAIN_SERVER if (is_wheat or kingdom == "Vertebrates") else KINGDOMS[kingdom]
     
-    # 1. Determine Server
-    # Wheat Exception: Wheat is a plant but lives on the MAIN server
-    is_wheat = (species_slug == "triticum_aestivum" or query.startswith("Traes"))
-    base_url = MAIN_SERVER if (is_wheat or kingdom == "Vertebrates") else GENOMES_SERVER
+    # Get the official species slug (Essential for Barley/Bacteria)
+    official_sp = resolve_exact_species(base_url, species.strip().lower())
 
-    # 2. Check for ID formats (ENS..., Traes..., b0344, etc.)
+    # STEP 1: ID Search (Direct)
     is_id = bool(re.match(r"^(ENS|Traes|Os|AT|MLOC|HORVU|Zm|Sobic|b\d{4})", query, re.I))
-
-    # --- STRATEGY A: ID LOOKUP ---
     if is_id:
-        # Check primary server then secondary
-        for srv in [base_url, MAIN_SERVER, GENOMES_SERVER]:
-            data = fetch(srv, f"/lookup/id/{query}")
-            if data: return data
+        data = fetch(base_url, f"/lookup/id/{query}")
+        if data: return data
 
-    # --- STRATEGY B: SYMBOL LOOKUP ---
-    # Try exact match
-    data = fetch(base_url, f"/lookup/symbol/{species_slug}/{query}")
-    if data: return data
-
-    # --- STRATEGY C: DEEP XREF SEARCH (The fix for lacZ / HSP101c) ---
-    # This searches external records (RefSeq, UniProt) linked to Ensembl
-    xrefs = fetch(base_url, f"/xrefs/symbol/{species_slug}/{query}")
+    # STEP 2: Xref Search (Deep search for synonyms like Hox1, Vrs1, lacZ)
+    # This is the most robust way to find genes by common names in Plants/Bacteria
+    xrefs = fetch(base_url, f"/xrefs/symbol/{official_sp}/{query}")
+    if not xrefs:
+        # Try a case-insensitive variant if first fails
+        xrefs = fetch(base_url, f"/xrefs/symbol/{official_sp}/{query.capitalize()}")
+    
     if xrefs:
         for item in xrefs:
             if item.get("type") == "gene":
                 gene_id = item.get("id")
-                # Cross-check the found ID on all servers
-                for srv in [base_url, MAIN_SERVER, GENOMES_SERVER]:
-                    data = fetch(srv, f"/lookup/id/{gene_id}")
-                    if data: return data
-                    
-    return None
+                return fetch(base_url, f"/lookup/id/{gene_id}")
+
+    # STEP 3: Last Resort - Standard Lookup
+    return fetch(base_url, f"/lookup/symbol/{official_sp}/{query}")
 
 def call_ai(api_key, prompt):
     try:
@@ -98,7 +91,7 @@ with st.sidebar:
         st.title("MATE-GBI")
     
     st.markdown("### 🖥️ Database Connection")
-    selected_kingdom = st.radio("Target Kingdom:", list(KINGDOMS.keys()))
+    selected_kingdom = st.radio("Target Kingdom:", list(KINGDOMS.keys()), index=1) # Default to Plants
     
     st.markdown("---")
     try:
@@ -114,7 +107,7 @@ with st.sidebar:
 st.title("🧬 Universal Gene Explorer")
 st.info(f"Connected to **{selected_kingdom}** Division")
 
-species_input = st.text_input("Species Name (e.g. homo_sapiens, triticum_aestivum, escherichia_coli):", value="homo_sapiens")
+species_input = st.text_input("Species Name (e.g. hordeum_vulgare, triticum_aestivum, escherichia_coli):", value="hordeum_vulgare")
 
 tab1, tab2 = st.tabs(["🔍 Single Lookup", "🔗 Relationship Analysis"])
 
@@ -122,11 +115,11 @@ tab1, tab2 = st.tabs(["🔍 Single Lookup", "🔗 Relationship Analysis"])
 with tab1:
     c1, c2 = st.columns([1, 2])
     with c1:
-        query_input = st.text_input("Gene Symbol or ID:", placeholder="e.g. lacZ, Rht-B1, TraesCS3B02G591300")
+        query_input = st.text_input("Gene Symbol or ID:", placeholder="e.g. Hox1, Vrs1, b0344")
         search_btn = st.button("Deep Search", use_container_width=True)
 
     if search_btn and query_input:
-        with st.spinner(f"Accessing Ensembl APIs for {query_input}..."):
+        with st.spinner(f"Running deep search for '{query_input}'..."):
             data = smart_lookup(selected_kingdom, species_input, query_input)
         
         if data:
@@ -136,28 +129,27 @@ with tab1:
             
             res_c1, res_c2 = st.columns(2)
             with res_c1:
-                st.write(f"**ID:** `{data.get('id')}`")
                 st.write(f"**Species:** `{data.get('species')}`")
-                st.write(f"**Biotype:** {data.get('biotype')}")
+                st.write(f"**Ensembl ID:** `{data.get('id')}`")
             with res_c2:
                 st.write(f"**Location:** {data.get('seq_region_name')}:{data.get('start')}-{data.get('end')}")
                 st.write(f"**Assembly:** {data.get('assembly_name')}")
 
             if ai_enabled and api_key:
                 with st.spinner("AI Synthesis..."):
-                    prompt = f"Provide a concise, scientific 3-bullet point summary for this gene: {json.dumps(data)}"
+                    prompt = f"Summarize this gene concisely (3 bullets): {json.dumps(data)}"
                     st.info(f"**🤖 AI Analysis:**\n\n{call_ai(api_key, prompt)}")
             
             with st.expander("View Raw Data"):
                 st.json(data)
         else:
             st.error(f"❌ '{query_input}' not found in '{species_input}'.")
-            st.warning("Note: Bacterial symbols are case-sensitive (try 'lacZ' vs 'lacz').")
+            st.warning("Tip: For Barley, ensure the Kingdom is 'Plants'. If 'Hox1' fails, try 'Vrs1'.")
 
 # --- TAB 2: RELATIONSHIP ANALYSIS ---
 with tab2:
     st.subheader("Concise Multi-Gene Relationship Analysis")
-    gene_list_raw = st.text_area("Gene List (commas):", placeholder="lacZ, lacY, lacA")
+    gene_list_raw = st.text_area("Gene List (commas):", placeholder="Vrs1, Hox2, HvHox1")
     analyze_btn = st.button("Analyze Connections", use_container_width=True)
 
     if analyze_btn and gene_list_raw:
