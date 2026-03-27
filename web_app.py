@@ -4,77 +4,88 @@ import json
 import re
 from google import genai
 
-# --- 1. Configuration ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(page_title="MATE-GBI Gene Explorer", layout="wide")
 
-# Separated Servers - User has total control
-SERVERS = {
-    "Vertebrates & Wheat (rest.ensembl.org)": "https://rest.ensembl.org",
-    "Plants - Rice/Maize/etc. (rest.ensemblgenomes.org)": "https://rest.ensemblgenomes.org",
-    "Bacteria (rest.ensemblgenomes.org)": "https://rest.ensemblgenomes.org",
-    "Fungi (rest.ensemblgenomes.org)": "https://rest.ensemblgenomes.org"
+# DEFINITIVE API SERVERS
+# Main Server handles Vertebrates + Bread Wheat (Triticum aestivum)
+MAIN_SERVER = "https://rest.ensembl.org"
+# Genomes Server handles Other Plants, Bacteria, Fungi, Protists
+GENOMES_SERVER = "https://rest.ensemblgenomes.org"
+
+# Strict Category Mapping
+KINGDOMS = {
+    "Vertebrates": MAIN_SERVER,
+    "Plants": GENOMES_SERVER,
+    "Bacteria": GENOMES_SERVER,
+    "Fungi": GENOMES_SERVER
 }
 
 HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
-MODEL_NAME = "gemini-3.1-flash-preview"
+MODEL_NAME = "gemini-2.5-flash"
 
-# --- 2. Logic Functions ---
+# --- 2. THE SEARCH ENGINE ---
 
-def fetch_api(base_url, endpoint):
-    """Standardized API communication."""
+def fetch(url):
     try:
-        url = f"{base_url}{endpoint}"
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        if response.status_code == 200:
-            return response.json()
-    except:
-        pass
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code == 200: return r.json()
+    except: pass
     return None
 
-def smart_lookup(base_url, species, query):
-    """
-    Strict Search Protocol:
-    1. Direct ID Lookup (If format matches)
-    2. Direct Symbol Lookup (Locked to species)
-    3. Xref Symbol Search (Locked to species - prevents 'Shark' errors)
-    """
+def resolve_bacterial_strain(species_query):
+    """Specific fix for Bacteria: finds the official strain slug."""
+    res = fetch(f"{GENOMES_SERVER}/info/species?name={species_query}")
+    if res and "species" in res and len(res["species"]) > 0:
+        return res["species"][0]["name"]
+    return species_query
+
+def smart_lookup(kingdom, species, query):
     if not query or not species: return None
     
-    # Clean inputs
     query = query.strip()
     species = species.strip().lower()
     
-    # ID Detection (ENS..., Traes..., Os..., etc.)
-    is_id = bool(re.match(r"^(ENS[A-Z]*G|Traes|Os|AT|MLOC|HORVU|Zm|Sobic|b\d{4})\d+", query, re.I))
+    # --- ROUTING LOGIC ---
+    # Rule 1: Default to the kingdom's server
+    base_url = KINGDOMS[kingdom]
     
-    # A. Search by ID
-    if is_id:
-        data = fetch_api(base_url, f"/lookup/id/{query}")
-        # Only return if the species matches (safety check)
-        if data and data.get('species', '').lower() == species:
-            return data
-        elif data and not is_id: # If it wasn't an ID but we found something, skip it
-            pass
+    # Rule 2: THE WHEAT EXCEPTION (Wheat lives on the Main server now)
+    is_wheat_id = bool(re.match(r"^Traes", query, re.I))
+    if kingdom == "Plants" and (species == "triticum_aestivum" or is_wheat_id):
+        base_url = MAIN_SERVER
+        
+    # Rule 3: BACTERIA STRAIN RESOLUTION
+    search_species = species
+    if kingdom == "Bacteria":
+        search_species = resolve_bacterial_strain(species)
+    # ----------------------
 
-    # B. Search by Symbol
-    data = fetch_api(base_url, f"/lookup/symbol/{species}/{query}")
+    # STEP A: Try Lookup by ID (ENS..., Traes..., Os..., b0344...)
+    is_id = bool(re.match(r"^(ENS[A-Z]*G|Traes|Os|AT|MLOC|HORVU|Zm|Sobic|b\d{4})\d+", query, re.I))
+    if is_id:
+        data = fetch(f"{base_url}/lookup/id/{query}")
+        # Verify species to prevent the "Shark" error
+        if data and data.get('species', '').lower() == search_species:
+            return data
+
+    # STEP B: Try Lookup by Symbol
+    data = fetch(f"{base_url}/lookup/symbol/{search_species}/{query}")
     if data: return data
 
-    # C. Deep Xref Search (For synonyms like Rht-B1 or HSP101c)
-    xrefs = fetch_api(base_url, f"/xrefs/symbol/{species}/{query}")
+    # STEP C: Deep Xref Search (For synonyms/common names like Rht-B1 or lacZ)
+    xrefs = fetch(f"{base_url}/xrefs/symbol/{search_species}/{query}")
     if xrefs:
         for item in xrefs:
-            # We filter the list of results to find a GENE that matches the EXACT species requested
             if item.get("type") == "gene":
                 potential_id = item.get("id")
-                lookup_data = fetch_api(base_url, f"/lookup/id/{potential_id}")
-                if lookup_data and lookup_data.get('species', '').lower() == species:
-                    return lookup_data
+                data = fetch(f"{base_url}/lookup/id/{potential_id}")
+                if data and data.get('species', '').lower() == search_species:
+                    return data
                     
     return None
 
-def call_gemini(api_key, prompt):
-    """Concise AI Synthesis."""
+def call_ai(api_key, prompt):
     try:
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
@@ -82,7 +93,7 @@ def call_gemini(api_key, prompt):
     except Exception as e:
         return f"⚠️ AI Error: {str(e)}"
 
-# --- 3. Sidebar UI ---
+# --- 3. THE INTERFACE ---
 
 with st.sidebar:
     try:
@@ -90,15 +101,10 @@ with st.sidebar:
     except:
         st.title("MATE-GBI")
     
-    st.markdown("### 🖥️ Database Connection")
-    selected_server_label = st.selectbox("Select Target Server:", list(SERVERS.keys()))
-    current_base_url = SERVERS[selected_server_label]
+    st.markdown("### 🧬 Database Selection")
+    # THE KEY REQUIREMENT: Separated by Kingdom
+    selected_kingdom = st.radio("Choose Kingdom:", list(KINGDOMS.keys()))
     
-    if "Vertebrates" in selected_server_label:
-        st.info("💡 Use this server for **Human** and **Bread Wheat**.")
-    else:
-        st.info("💡 Use this server for **Rice, Bacteria, and Fungi**.")
-
     st.markdown("---")
     try:
         api_key = st.secrets["GEMINI_API_KEY"]
@@ -106,31 +112,34 @@ with st.sidebar:
     except:
         api_key = st.text_input("Gemini API Key:", type="password")
 
-    ai_enabled = st.checkbox("Enable AI Summary", value=True)
+    ai_enabled = st.checkbox("Enable AI Synthesis", value=True)
     st.markdown("---")
     st.caption("Designed by Maher, MATE-GBI")
+    st.caption("Hungarian University of Agriculture and Life Sciences")
 
-# --- 4. Main Interface ---
+# --- MAIN UI ---
+st.title("Universal Gene Explorer")
+st.info(f"Targeting: **{selected_kingdom}** Database")
 
-st.title("🧬 Universal Gene Explorer")
-species_input = st.text_input("Species (lowercase_underscore):", value="triticum_aestivum")
+species_input = st.text_input("Target Species (e.g. homo_sapiens, triticum_aestivum, escherichia_coli):", value="homo_sapiens")
 
-tab1, tab2 = st.tabs(["🔍 Single Lookup", "🔗 Relationship Analysis"])
+tab1, tab2 = st.tabs(["🧬 Single Lookup", "🔗 Relationship Analysis"])
 
 # --- TAB 1: SINGLE LOOKUP ---
 with tab1:
     c1, c2 = st.columns([1, 2])
     with c1:
-        query_input = st.text_input("Gene Symbol or ID:", placeholder="e.g. Rht-B1, TraesCS3B02G591300")
-        search_btn = st.button("Search", use_container_width=True)
+        query_input = st.text_input("Gene ID or Symbol:", placeholder="e.g. Rht-B1, lacZ, BRCA2")
+        search_btn = st.button("Deep Fetch", use_container_width=True)
 
     if search_btn and query_input:
-        with st.spinner(f"Querying {selected_server_label}..."):
-            data = smart_lookup(current_base_url, species_input, query_input)
+        with st.spinner(f"Accessing {selected_kingdom} API..."):
+            data = smart_lookup(selected_kingdom, species_input, query_input)
         
         if data:
-            st.success(f"✅ Found: {data.get('display_name', query_input)}")
-            st.markdown(f"**Description:** {data.get('description', 'N/A')}")
+            st.success(f"✅ Found in {data.get('species')}")
+            st.markdown(f"### {data.get('display_name', query_input)}")
+            st.write(f"**Description:** {data.get('description', 'N/A')}")
             
             res_c1, res_c2 = st.columns(2)
             with res_c1:
@@ -138,25 +147,23 @@ with tab1:
                 st.write(f"**ID:** `{data.get('id')}`")
                 st.write(f"**Biotype:** {data.get('biotype')}")
             with res_c2:
-                st.write(f"**Chromosome:** {data.get('seq_region_name')}")
-                st.write(f"**Position:** {data.get('start')}-{data.get('end')}")
+                st.write(f"**Location:** {data.get('seq_region_name')}:{data.get('start')}-{data.get('end')}")
                 st.write(f"**Assembly:** {data.get('assembly_name')}")
 
             if ai_enabled and api_key:
-                with st.spinner("AI Summarizing..."):
+                with st.spinner("AI Synthesis..."):
                     prompt = f"Provide a concise, scientific 3-bullet point summary for this gene: {json.dumps(data)}"
-                    st.info(f"**🤖 AI Analysis:**\n\n{call_gemini(api_key, prompt)}")
+                    st.info(f"**🤖 AI Insights:**\n\n{call_ai(api_key, prompt)}")
             
-            with st.expander("View Raw API Response"):
+            with st.expander("View Raw Metadata"):
                 st.json(data)
         else:
-            st.error(f"❌ '{query_input}' not found in '{species_input}' on the selected server.")
-            st.warning("Ensure the 'Target Server' in the sidebar matches your organism (e.g., Wheat is on the Vertebrates server).")
+            st.error(f"❌ '{query_input}' not found in '{species_input}' on the {selected_kingdom} server.")
 
 # --- TAB 2: RELATIONSHIP ANALYSIS ---
 with tab2:
     st.subheader("Concise Multi-Gene Relationship Analysis")
-    gene_list_raw = st.text_area("Gene List (commas):", placeholder="BRCA1, BRCA2, ATM")
+    gene_list_raw = st.text_area("Gene list (commas):", placeholder="BRCA1, BRCA2, ATM")
     analyze_btn = st.button("Analyze Connections", use_container_width=True)
 
     if analyze_btn and gene_list_raw:
@@ -167,15 +174,15 @@ with tab2:
             collected_data = []
             pbar = st.progress(0)
             for i, g in enumerate(genes):
-                d = smart_lookup(current_base_url, species_input, g)
+                d = smart_lookup(selected_kingdom, species_input, g)
                 if d:
                     collected_data.append({"symbol": d.get('display_name'), "desc": d.get('description')})
                 pbar.progress((i + 1) / len(genes))
             
             if collected_data:
-                with st.spinner("AI Synthesizing..."):
-                    prompt = f"Analyze biological relationships concisely: {json.dumps(collected_data)}. Focus on pathways. No intros."
-                    st.markdown("### --- ANALYSIS ---")
-                    st.write(call_gemini(api_key, prompt))
+                with st.spinner("AI Synthesis..."):
+                    prompt = f"Analyze relationships concisely: {json.dumps(collected_data)}. Focus on pathways. No intros."
+                    st.markdown("### --- CONCISE RELATIONSHIP ANALYSIS ---")
+                    st.markdown(call_ai(api_key, prompt))
             else:
-                st.error("Could not find any genes from the list on this server.")
+                st.error("Could not find any of these genes in the selected kingdom.")
