@@ -40,59 +40,120 @@ def fetch(base_url, endpoint, debug_log=None):
 @st.cache_data(ttl=3600, show_spinner=False)
 def resolve_exact_species(base_url, species_query):
     """
-    Map a loose species name to the server's exact internal slug.
-    e.g. 'hordeum_vulgare' -> 'hordeum_vulgare_goldenpromise'
-    Cached for 1 hour — free on repeated searches within the same session.
+    Robustly maps ANY species input to the server's exact internal slug.
+
+    Handles three kinds of input:
+      - Slug:        'oryctolagus_cuniculus'  -> exact match on name field
+      - Common name: 'rabbit'                 -> match on common_name / aliases
+      - Partial:     'homo'                   -> match on slug prefix
+
+    Priority order (stops at first match):
+      1. Exact slug match          e.g. 'homo_sapiens' == 'homo_sapiens'
+      2. Common name match         e.g. 'rabbit' in common_name 'rabbit'
+      3. Alias match               e.g. 'mouse' in aliases list
+      4. Slug starts-with match    e.g. 'hordeum' -> 'hordeum_vulgare_...'
+      5. Fallback: original query  (don't blindly use candidates[0])
+
+    Returning the original query on failure is safer than returning a random
+    species — the gene search will then fail cleanly rather than silently
+    searching the wrong organism.
     """
     res = fetch(base_url, f"/info/species?name={species_query}")
-    if res and "species" in res and len(res["species"]) > 0:
-        candidates = res["species"]
-        # Prefer exact match, then slug that starts with the query (versioned slugs)
-        for c in candidates:
-            if c["name"] == species_query:
-                return c["name"]
-        for c in candidates:
-            if c["name"].startswith(species_query):
-                return c["name"]
-        return candidates[0]["name"]
+    if not res or "species" not in res or len(res["species"]) == 0:
+        return species_query
+
+    candidates = res["species"]
+    q = species_query.lower().strip()
+
+    # 1. Exact slug match
+    for c in candidates:
+        if c.get("name", "").lower() == q:
+            return c["name"]
+
+    # 2. Common name match (case-insensitive)
+    for c in candidates:
+        common = c.get("common_name", "") or ""
+        if common.lower() == q:
+            return c["name"]
+
+    # 3. Alias match — Ensembl returns aliases as a list
+    for c in candidates:
+        aliases = c.get("aliases", []) or []
+        if any(a.lower() == q for a in aliases):
+            return c["name"]
+
+    # 4. Slug starts-with (catches versioned slugs like hordeum_vulgare_goldenpromise)
+    for c in candidates:
+        if c.get("name", "").startswith(q):
+            return c["name"]
+
+    # 5. Partial common name match (e.g. "domestic rabbit" contains "rabbit")
+    for c in candidates:
+        common = c.get("common_name", "") or ""
+        if q in common.lower():
+            return c["name"]
+
+    # No confident match — return original so the search fails transparently
     return species_query
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_species_display_info(base_url, species_query):
+    """
+    Returns (resolved_slug, common_name, assembly) for a species query.
+    Used to show the user a confirmation of what was actually resolved.
+    """
+    res = fetch(base_url, f"/info/species?name={species_query}")
+    if not res or "species" not in res or len(res["species"]) == 0:
+        return species_query, None, None
+
+    candidates = res["species"]
+    q = species_query.lower().strip()
+
+    # Same priority logic as resolve_exact_species
+    def score(c):
+        name   = c.get("name", "").lower()
+        common = (c.get("common_name", "") or "").lower()
+        aliases = [a.lower() for a in (c.get("aliases", []) or [])]
+        if name == q:             return 0
+        if common == q:           return 1
+        if q in aliases:          return 2
+        if name.startswith(q):    return 3
+        if q in common:           return 4
+        return 99
+
+    best = min(candidates, key=score)
+    if score(best) == 99:
+        return species_query, None, None
+
+    return (
+        best.get("name", species_query),
+        best.get("common_name") or best.get("display_name"),
+        best.get("assembly"),
+    )
 
 
 def _case_variants(query):
     """
-    Build a short list of name variants to try, purely from the query itself.
-    No hardcoded species prefixes — works for any organism.
-
-    The dynamic prefix detection handles the convention used across ALL kingdoms
-    where gene names carry a 2-3 letter species code (HvHox1, OsFLC, AtCBF,
-    BnaA, MtDef, etc.).  The regex detects the boundary between the prefix and
-    the gene name without needing to know the species in advance.
+    Build a short list of name variants from the query alone.
+    Dynamically detects 2-3 letter species prefix (HvHox1, AtFLC, OsMADS).
     """
     variants = [
-        query,              # original as typed — most likely to hit, goes first
-        query.capitalize(), # e.g. hox1 -> Hox1
-        query.upper(),      # e.g. Hox1 -> HOX1
-        query.lower(),      # e.g. HOX1 -> hox1
+        query,
+        query.capitalize(),
+        query.upper(),
+        query.lower(),
     ]
-
-    # Dynamically detect a 2-3 letter species prefix before an uppercase letter:
-    # HvHox1  -> prefix "Hv", gene "Hox1"
-    # OsMADS1 -> prefix "Os", gene "MADS1"
-    # AtFLC   -> prefix "At", gene "FLC"
-    # b0344   -> no match (starts with lowercase, no uppercase boundary)
     m = re.match(r'^([A-Za-z]{2,3})([A-Z].+)$', query)
     if m:
-        variants.append(m.group(2))            # strip prefix: HvHox1 -> Hox1
-        variants.append(m.group(2).upper())    # also try all-caps: HOX1
-        variants.append(m.group(2).lower())    # also try lower: hox1
-
-    # Deduplicate while preserving priority order
+        variants.append(m.group(2))
+        variants.append(m.group(2).upper())
+        variants.append(m.group(2).lower())
     seen = set()
     return [v for v in variants if not (v in seen or seen.add(v))]
 
 
 def _xref_search(base_url, species_slug, query, debug_log):
-    """Xref/symbol search — exits immediately on first gene hit."""
     for variant in _case_variants(query):
         xrefs = fetch(base_url, f"/xrefs/symbol/{species_slug}/{variant}", debug_log)
         if xrefs:
@@ -105,7 +166,6 @@ def _xref_search(base_url, species_slug, query, debug_log):
 
 
 def _symbol_search(base_url, species_slug, query, debug_log):
-    """lookup/symbol search — exits immediately on first hit."""
     for variant in _case_variants(query):
         data = fetch(base_url, f"/lookup/symbol/{species_slug}/{variant}", debug_log)
         if data:
@@ -118,12 +178,9 @@ def smart_lookup(kingdom, species, query, debug_log=None):
         return None
 
     query         = query.strip()
-    # Server is determined purely by the kingdom the user selected.
-    # No species-name sniffing, no hardcoded gene-prefix routing.
     base_url      = KINGDOMS[kingdom]
     species_clean = species.strip().lower()
 
-    # resolve_exact_species is cached — free after the first call per species
     resolved_sp   = resolve_exact_species(base_url, species_clean)
     sp_candidates = list(dict.fromkeys([resolved_sp, species_clean]))
 
@@ -132,40 +189,29 @@ def smart_lookup(kingdom, species, query, debug_log=None):
         debug_log.append(f"Species candidates: {sp_candidates}")
         debug_log.append(f"Variants: {_case_variants(query)}")
 
-    # ── Step 1: Direct stable-ID lookup ──────────────────────────────────────
-    # All Ensembl stable IDs share the pattern: letters then 11 digits,
-    # but we also catch shorter accession-like strings (b0344, AT1G01010, etc.)
-    # by checking for uppercase-letters + digits with no intervening lowercase.
-    # A single fast call; a 404 costs almost nothing.
-    looks_like_id = bool(re.match(r'^[A-Za-z]{1,6}\d', query)) and query == query.replace(" ", "")
+    # Step 1: Direct stable-ID lookup
+    looks_like_id = bool(re.match(r'^[A-Za-z]{1,6}\d', query)) and " " not in query
     if looks_like_id:
         data = fetch(base_url, f"/lookup/id/{query}", debug_log)
         if data:
             return data
 
-    # ── Step 2: Xref / synonym search ────────────────────────────────────────
+    # Step 2: Xref / synonym search
     for sp in sp_candidates:
         data = _xref_search(base_url, sp, query, debug_log)
         if data:
             return data
 
-    # ── Step 3: Direct symbol lookup ─────────────────────────────────────────
+    # Step 3: Direct symbol lookup
     for sp in sp_candidates:
         data = _symbol_search(base_url, sp, query, debug_log)
         if data:
             return data
 
-    # ── Step 4: Cross-server fallback ────────────────────────────────────────
-    # Try the other Ensembl server as a last resort.
-    # This catches edge cases (e.g. a vertebrate gene that also has an entry
-    # in EnsemblGenomes, or a plant gene accidentally routed to the wrong server).
-    # Skipped if both servers are the same (Plants/Bacteria/Fungi all map to
-    # GENOMES_SERVER, so there is no "other" server to try for those kingdoms
-    # unless it would be the vertebrate one — which we do try for completeness).
+    # Step 4: Cross-server fallback
     alt_url = GENOMES_SERVER if base_url == MAIN_SERVER else MAIN_SERVER
     if debug_log is not None:
         debug_log.append(f"Cross-server fallback: {alt_url}")
-
     alt_sp = resolve_exact_species(alt_url, species_clean)
     for sp in list(dict.fromkeys([alt_sp, species_clean])):
         data = _xref_search(alt_url, sp, query, debug_log)
@@ -213,9 +259,29 @@ st.title("🧬 Universal Gene Explorer")
 st.info(f"Connected to **{selected_kingdom}** Division")
 
 species_input = st.text_input(
-    "Species Name (e.g. homo_sapiens, arabidopsis_thaliana, escherichia_coli, danio_rerio):",
+    "Species (scientific name or common name — e.g. homo_sapiens, rabbit, arabidopsis_thaliana):",
     value="hordeum_vulgare"
 )
+
+# ── Species resolution preview ───────────────────────────────────────────────
+# Show the user exactly which species was resolved before they search,
+# so a wrong match is visible immediately rather than after a failed gene lookup.
+if species_input.strip():
+    base_url_preview = KINGDOMS[selected_kingdom]
+    resolved_slug, common_name, assembly = get_species_display_info(
+        base_url_preview, species_input.strip().lower()
+    )
+    if resolved_slug != species_input.strip().lower() or common_name:
+        label_parts = [f"`{resolved_slug}`"]
+        if common_name:
+            label_parts.append(common_name.title())
+        if assembly:
+            label_parts.append(f"assembly: {assembly}")
+        st.caption(f"Resolved to: {' — '.join(label_parts)}")
+    elif resolved_slug == species_input.strip().lower():
+        st.caption(f"Species recognised: `{resolved_slug}`")
+    else:
+        st.warning(f"Species '{species_input}' not found on this server. Check spelling or try the scientific name.")
 
 tab1, tab2 = st.tabs(["🔍 Single Lookup", "🔗 Relationship Analysis"])
 
@@ -261,10 +327,10 @@ with tab1:
             st.error(f"❌ '{query_input}' not found in '{species_input}'.")
             st.warning(
                 "**Troubleshooting tips:**\n"
+                "- Check the species preview above — if the wrong species was resolved, "
+                "use the full scientific name (e.g. `oryctolagus_cuniculus` instead of `rabbit`).\n"
                 "- Enable **Debug Mode** in the sidebar to see every URL tried.\n"
                 "- Make sure the correct Kingdom is selected.\n"
-                "- Check the exact species slug at [Ensembl](https://www.ensembl.org) "
-                "or [EnsemblGenomes](https://plants.ensembl.org).\n"
                 "- Try the gene's official symbol if a common name was used."
             )
 
