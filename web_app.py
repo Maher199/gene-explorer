@@ -334,7 +334,7 @@ with tab1:
             st.success("✅ Gene Found!")
             st.markdown(f"### {data.get('display_name', query_input)}")
             st.write(f"**Description:** {data.get('description', 'No description found in Ensembl.')}")
-            st.markdown(f"[🔗 View on Ensembl]({ensembl_url})")
+            st.markdown(f'<a href="{ensembl_url}" target="_blank"><img src="https://www.ensembl.org/favicon.ico" width="16" style="vertical-align:middle; margin-right:6px;"/>View on Ensembl</a>', unsafe_allow_html=True)
 
             res_c1, res_c2 = st.columns(2)
             with res_c1:
