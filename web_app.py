@@ -319,9 +319,22 @@ with tab1:
                     st.code(line)
 
         if data:
+            # Build Ensembl link from species + gene ID
+            ENSEMBL_SUBDOMAIN = {
+                "Vertebrates": "www",
+                "Plants":      "plants",
+                "Fungi":       "fungi",
+                "Bacteria":    "bacteria",
+            }
+            subdomain   = ENSEMBL_SUBDOMAIN.get(selected_kingdom, "www")
+            species_url = data.get("species", "").replace(" ", "_").capitalize()
+            gene_id_url = data.get("id", "")
+            ensembl_url = f"https://{subdomain}.ensembl.org/{species_url}/Gene/Summary?g={gene_id_url}"
+
             st.success("✅ Gene Found!")
             st.markdown(f"### {data.get('display_name', query_input)}")
             st.write(f"**Description:** {data.get('description', 'No description found in Ensembl.')}")
+            st.markdown(f"[🔗 View on Ensembl]({ensembl_url})")
 
             res_c1, res_c2 = st.columns(2)
             with res_c1:
