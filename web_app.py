@@ -253,6 +253,7 @@ with st.sidebar:
     ai_enabled = st.checkbox("Enable AI Analysis", value=True)
     debug_mode = st.checkbox("🛠️ Debug Mode", value=False)
     st.caption("Designed by Maher, MATE-GBI")
+    st.caption("Hungarian University of Agriculture and Life Science")
 
 # --- MAIN UI ---
 st.title("🧬 Universal Gene Explorer")
@@ -282,6 +283,20 @@ if species_input.strip():
         st.caption(f"Species recognised: `{resolved_slug}`")
     else:
         st.warning(f"Species '{species_input}' not found on this server. Check spelling or try the scientific name.")
+
+# ── Bacteria usage note ──────────────────────────────────────────────────────
+if selected_kingdom == "Bacteria":
+    st.info(
+        "**Searching in Bacteria?** Two things to know:\n\n"
+        "**Species:** Use the full strain slug, not just genus/species. "
+        "EnsemblGenomes stores bacteria by assembly strain. Examples:\n"
+        "- `escherichia_coli_str_k_12_substr_mg1655_gca_000005845`\n"
+        "- `bacillus_subtilis_subsp_subtilis_str_168_gca_000009045`\n\n"
+        "**Genes:** Bacteria use **locus tags**, not gene symbols. "
+        "Gene names like `comK` or `lacZ` are rarely indexed — use the locus tag instead:\n"
+        "- E. coli: `b0344` *(lacZ)*, `b0734` *(recA)*\n"
+        "- B. subtilis: `BSU24220` *(spo0A)*, `BSU26890` *(comK)*"
+    )
 
 tab1, tab2 = st.tabs(["🔍 Single Lookup", "🔗 Relationship Analysis"])
 
