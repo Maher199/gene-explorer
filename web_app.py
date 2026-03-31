@@ -337,7 +337,18 @@ with tab1:
                     st.info(f"**🤖 AI Analysis:**\n\n{call_ai(api_key, prompt)}")
 
             with st.expander("View Raw Data"):
-                st.json(data)
+                rows = []
+                for k, v in data.items():
+                    if isinstance(v, dict):
+                        display_v = json.dumps(v)
+                    elif isinstance(v, list):
+                        display_v = ", ".join(str(i) for i in v) if v else "—"
+                    elif v is None or v == "":
+                        display_v = "—"
+                    else:
+                        display_v = str(v)
+                    rows.append({"Field": k, "Value": display_v})
+                st.table(rows)
         else:
             st.error(f"❌ '{query_input}' not found in '{species_input}'.")
             st.warning(
